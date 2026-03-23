@@ -11,7 +11,8 @@ from datetime import datetime
 import bot
 
 bot.init_db()
-
+polymarket_ws.start_background()
+import polymarket_ws
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.CYBORG],
