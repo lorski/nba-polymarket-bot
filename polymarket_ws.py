@@ -1,325 +1,311 @@
-# ═══════════════════════════════════════════════════
-# ეს კოდი bot.py-ს ᲑᲝᲚᲝᲨᲘ დაამატე
-# (import requests უკვე გაქვს ზევით)
-# ═══════════════════════════════════════════════════
+# ════════════════════════════════════════════════════
+# polymarket_ws.py — Real-time Polymarket NBA Odds
+# WebSocket კავშირი — მომენტალური განახლება
+# ════════════════════════════════════════════════════
 
-import os
+import json, time, threading, os, requests
+import websocket
+from datetime import datetime
 
-POLY_HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json",
-    "POLY-API-KEY": os.environ.get("POLY_API_KEY", ""),
-}
+# ── Live Odds Store (memory) ──────────────────────
+LIVE_ODDS = {}   # {market_id: {question, h_price, a_price, h_odds, a_odds, updated}}
+NBA_MARKETS = {} # {market_id: {question, token_ids}}
+_ws = None
+_running = False
 
-TEAM_SLUGS = {
-    "Los Angeles Lakers":     ["lakers", "los-angeles-lakers"],
-    "Boston Celtics":         ["celtics", "boston-celtics"],
-    "Golden State Warriors":  ["warriors", "golden-state-warriors"],
-    "Miami Heat":             ["heat", "miami-heat"],
-    "Chicago Bulls":          ["bulls", "chicago-bulls"],
-    "New York Knicks":        ["knicks", "new-york-knicks"],
-    "Brooklyn Nets":          ["nets", "brooklyn-nets"],
-    "Cleveland Cavaliers":    ["cavaliers", "cleveland-cavaliers"],
-    "Philadelphia 76ers":     ["76ers", "philadelphia-76ers", "sixers"],
-    "Milwaukee Bucks":        ["bucks", "milwaukee-bucks"],
-    "Denver Nuggets":         ["nuggets", "denver-nuggets"],
-    "Phoenix Suns":           ["suns", "phoenix-suns"],
-    "LA Clippers":            ["clippers", "la-clippers", "los-angeles-clippers"],
-    "Dallas Mavericks":       ["mavericks", "dallas-mavericks"],
-    "San Antonio Spurs":      ["spurs", "san-antonio-spurs"],
-    "Houston Rockets":        ["rockets", "houston-rockets"],
-    "Utah Jazz":              ["jazz", "utah-jazz"],
-    "Oklahoma City Thunder":  ["thunder", "oklahoma-city-thunder"],
-    "Portland Trail Blazers": ["trail-blazers", "portland-trail-blazers"],
-    "Sacramento Kings":       ["kings", "sacramento-kings"],
-    "Atlanta Hawks":          ["hawks", "atlanta-hawks"],
-    "Charlotte Hornets":      ["hornets", "charlotte-hornets"],
-    "Detroit Pistons":        ["pistons", "detroit-pistons"],
-    "Indiana Pacers":         ["pacers", "indiana-pacers"],
-    "Toronto Raptors":        ["raptors", "toronto-raptors"],
-    "New Orleans Pelicans":   ["pelicans", "new-orleans-pelicans"],
-    "Memphis Grizzlies":      ["grizzlies", "memphis-grizzlies"],
-    "Minnesota Timberwolves": ["timberwolves", "minnesota-timberwolves"],
-    "Washington Wizards":     ["wizards", "washington-wizards"],
-    "Orlando Magic":          ["magic", "orlando-magic"],
-}
-
-def get_team_keywords(team):
-    slugs = TEAM_SLUGS.get(team, [])
-    short = team.split()[-1].lower()
-    return slugs + [short]
+# ── Polymarket Auth ───────────────────────────────
+def get_auth_headers():
+    import hmac, hashlib
+    api_key    = os.environ.get("POLY_API_KEY", "")
+    api_secret = os.environ.get("POLY_SECRET", "")
+    api_pass   = os.environ.get("POLY_PASSPHRASE", "")
+    ts = str(int(time.time() * 1000))
+    msg = ts + "GET" + "/"
+    sig = hmac.new(api_secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    return {
+        "POLY-API-KEY":        api_key,
+        "POLY-SIGNATURE":      sig,
+        "POLY-TIMESTAMP":      ts,
+        "POLY-PASSPHRASE":     api_pass,
+        "Content-Type":        "application/json",
+    }
 
 
-def fetch_polymarket_nba():
+# ── Fetch NBA Markets ─────────────────────────────
+def fetch_nba_markets():
     """
-    Polymarket-იდან NBA markets ამოღება
-    3 endpoint სცადე
+    Polymarket-იდან NBA markets-ის ჩამოტვირთვა
     """
-    markets = []
+    global NBA_MARKETS
+    found = {}
 
-    # ── Endpoint 1: Gamma Events API ──────────────
+    # Gamma API
     try:
-        url = "https://gamma-api.polymarket.com/events"
-        params = {"limit": 100, "active": "true"}
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(
+            "https://gamma-api.polymarket.com/events",
+            params={"limit": 200, "active": "true"},
+            timeout=10
+        )
         if r.status_code == 200:
-            events = r.json()
-            for ev in events:
-                slug = ev.get("slug", "").lower()
-                title = ev.get("title", "").lower()
+            for ev in r.json():
+                slug  = ev.get("slug","").lower()
+                title = ev.get("title","").lower()
                 if "nba" in slug or "nba" in title:
-                    for market in ev.get("markets", []):
-                        q = market.get("question", "").lower()
-                        prices = market.get("outcomePrices", "")
-                        if prices:
-                            try:
-                                ps = [float(x.strip()) for x in prices.strip("[]").split(",")]
-                                if len(ps) >= 2 and 0.01 < ps[0] < 0.99:
-                                    markets.append({
-                                        "question": market.get("question",""),
-                                        "h_prob": ps[0],
-                                        "a_prob": ps[1],
-                                        "h_odds": round(1/ps[0], 2),
-                                        "a_odds": round(1/ps[1], 2),
-                                        "slug": ev.get("slug",""),
-                                        "source": "gamma"
-                                    })
-                            except:
-                                pass
+                    for m in ev.get("markets", []):
+                        mid = m.get("id","")
+                        q   = m.get("question","")
+                        tok = m.get("clobTokenIds","[]")
+                        if isinstance(tok, str):
+                            tok = json.loads(tok)
+                        if mid:
+                            found[mid] = {"question": q, "token_ids": tok, "slug": slug}
     except Exception as e:
-        print(f"Gamma events error: {e}")
+        print(f"Gamma fetch error: {e}")
 
-    # ── Endpoint 2: Gamma Markets search ──────────
-    if not markets:
+    # CLOB API fallback
+    if not found:
         try:
-            for keyword in ["nba", "basketball"]:
-                url = "https://gamma-api.polymarket.com/markets"
-                params = {
-                    "limit": 100,
-                    "active": "true",
-                    "closed": "false",
-                    "q": keyword
-                }
-                r = requests.get(url, params=params, timeout=10)
-                if r.status_code == 200:
-                    data = r.json()
-                    for m in data:
-                        q = m.get("question", "").lower()
-                        if any(t in q for t in ["nba","lakers","celtics","knicks",
-                                                 "warriors","bucks","cavaliers"]):
-                            prices = m.get("outcomePrices","")
-                            if prices:
-                                try:
-                                    ps = [float(x.strip()) for x in prices.strip("[]").split(",")]
-                                    if len(ps) >= 2 and 0.01 < ps[0] < 0.99:
-                                        markets.append({
-                                            "question": m.get("question",""),
-                                            "h_prob": ps[0],
-                                            "a_prob": ps[1],
-                                            "h_odds": round(1/ps[0], 2),
-                                            "a_odds": round(1/ps[1], 2),
-                                            "slug": m.get("slug",""),
-                                            "source": "gamma_search"
-                                        })
-                                except:
-                                    pass
-        except Exception as e:
-            print(f"Gamma markets error: {e}")
-
-    # ── Endpoint 3: CLOB ──────────────────────────
-    if not markets:
-        try:
-            url = "https://clob.polymarket.com/markets"
-            r = requests.get(url, params={"limit":100,"active":"true"}, timeout=10)
+            r = requests.get(
+                "https://clob.polymarket.com/markets",
+                params={"limit": 100, "active": "true"},
+                timeout=10
+            )
             if r.status_code == 200:
-                data = r.json().get("data", [])
-                for m in data:
+                for m in r.json().get("data", []):
                     q = m.get("question","").lower()
                     if any(t in q for t in ["nba","lakers","celtics","warriors",
-                                             "knicks","cavaliers","bucks"]):
-                        tokens = m.get("tokens", [])
-                        if len(tokens) >= 2:
-                            try:
-                                p1 = float(tokens[0].get("price", 0.5))
-                                p2 = float(tokens[1].get("price", 0.5))
-                                if 0.01 < p1 < 0.99:
-                                    markets.append({
-                                        "question": m.get("question",""),
-                                        "h_prob": p1,
-                                        "a_prob": p2,
-                                        "h_odds": round(1/p1, 2),
-                                        "a_odds": round(1/p2, 2),
-                                        "slug": m.get("condition_id",""),
-                                        "source": "clob"
-                                    })
-                            except:
-                                pass
+                                             "knicks","cavaliers","bucks","nuggets",
+                                             "heat","suns","clippers","spurs","rockets"]):
+                        mid = m.get("condition_id","")
+                        tokens = [t.get("token_id","") for t in m.get("tokens",[])]
+                        if mid:
+                            found[mid] = {
+                                "question": m.get("question",""),
+                                "token_ids": tokens,
+                                "slug": m.get("market_slug","")
+                            }
         except Exception as e:
-            print(f"CLOB error: {e}")
+            print(f"CLOB fetch error: {e}")
 
-    return markets
+    NBA_MARKETS = found
+    print(f"[WS] NBA markets found: {len(found)}")
+    return found
 
 
-def match_game_to_polymarket(home, away, poly_markets):
+# ── Fetch Current Prices (REST) ───────────────────
+def fetch_current_prices():
     """
-    ESPN გუნდები → Polymarket market მოძებნა
+    REST API-დან ახლანდელი prices
+    (WebSocket-ის backup)
     """
-    h_keys = get_team_keywords(home)
-    a_keys = get_team_keywords(away)
+    global LIVE_ODDS
+    if not NBA_MARKETS:
+        fetch_nba_markets()
 
-    for m in poly_markets:
-        q = m["question"].lower()
+    for mid, info in NBA_MARKETS.items():
+        try:
+            # Gamma outcomePrices
+            r = requests.get(
+                f"https://gamma-api.polymarket.com/markets/{mid}",
+                timeout=8
+            )
+            if r.status_code == 200:
+                m = r.json()
+                prices_str = m.get("outcomePrices","")
+                if prices_str:
+                    ps = [float(x.strip()) for x in prices_str.strip("[]").split(",")]
+                    if len(ps) >= 2 and 0.01 < ps[0] < 0.99:
+                        LIVE_ODDS[mid] = {
+                            "question": info["question"],
+                            "h_price":  round(ps[0], 4),
+                            "a_price":  round(ps[1], 4),
+                            "h_odds":   round(1/ps[0], 2),
+                            "a_odds":   round(1/ps[1], 2),
+                            "updated":  datetime.now().strftime("%H:%M:%S"),
+                            "source":   "rest"
+                        }
+        except:
+            pass
+        time.sleep(0.1)
+
+    print(f"[REST] Live prices: {len(LIVE_ODDS)}")
+    return LIVE_ODDS
+
+
+# ── WebSocket ─────────────────────────────────────
+def on_message(ws, message):
+    global LIVE_ODDS
+    try:
+        data = json.loads(message)
+        event_type = data.get("event_type","")
+        asset_id   = data.get("asset_id","")
+
+        # Price update
+        if event_type in ["price_change","book"] and asset_id:
+            price = float(data.get("price", 0))
+            if 0.01 < price < 0.99:
+                # ვეძებთ market_id-ს ამ token-ისთვის
+                for mid, info in NBA_MARKETS.items():
+                    tokens = info.get("token_ids",[])
+                    if asset_id in tokens:
+                        idx = tokens.index(asset_id)
+                        if mid not in LIVE_ODDS:
+                            LIVE_ODDS[mid] = {
+                                "question": info["question"],
+                                "h_price": 0.5, "a_price": 0.5,
+                                "h_odds": 2.0,  "a_odds": 2.0,
+                                "updated": "—", "source": "ws"
+                            }
+                        if idx == 0:
+                            LIVE_ODDS[mid]["h_price"] = round(price,4)
+                            LIVE_ODDS[mid]["h_odds"]  = round(1/price,2)
+                        else:
+                            LIVE_ODDS[mid]["a_price"] = round(price,4)
+                            LIVE_ODDS[mid]["a_odds"]  = round(1/price,2)
+                        LIVE_ODDS[mid]["updated"] = datetime.now().strftime("%H:%M:%S")
+                        LIVE_ODDS[mid]["source"]  = "websocket"
+                        break
+    except Exception as e:
+        pass
+
+
+def on_error(ws, error):
+    print(f"[WS] Error: {error}")
+
+
+def on_close(ws, code, msg):
+    global _running
+    print(f"[WS] Closed: {code}")
+    if _running:
+        print("[WS] Reconnecting in 5s...")
+        time.sleep(5)
+        start_websocket()
+
+
+def on_open(ws):
+    print("[WS] Connected to Polymarket!")
+    # Subscribe to all NBA market tokens
+    token_ids = []
+    for info in NBA_MARKETS.values():
+        token_ids.extend(info.get("token_ids",[]))
+
+    if token_ids:
+        sub_msg = json.dumps({
+            "type":    "subscribe",
+            "channel": "live_activity",
+            "assets_ids": token_ids[:50]  # max 50 per message
+        })
+        ws.send(sub_msg)
+        print(f"[WS] Subscribed to {len(token_ids)} tokens")
+
+
+def start_websocket():
+    global _ws, _running
+    _running = True
+
+    if not NBA_MARKETS:
+        fetch_nba_markets()
+
+    websocket.enableTrace(False)
+    _ws = websocket.WebSocketApp(
+        "wss://ws-live-data.polymarket.com",
+        header=get_auth_headers(),
+        on_open=on_open,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+    )
+    _ws.run_forever(ping_interval=30, ping_timeout=10)
+
+
+def stop_websocket():
+    global _running, _ws
+    _running = False
+    if _ws:
+        _ws.close()
+
+
+# ── Background Thread ─────────────────────────────
+def start_background():
+    """
+    Background-ში გაუშვი:
+    1. NBA markets ჩამოტვირთე
+    2. REST prices ამოიღე
+    3. WebSocket დაიწყე
+    4. ყოველ 30 წამს REST refresh
+    """
+    print("[BG] Starting Polymarket background service...")
+
+    # ჯერ markets ჩამოტვირთე
+    fetch_nba_markets()
+
+    # REST prices (სწრაფი პირველი ჩატვირთვა)
+    fetch_current_prices()
+
+    # WebSocket thread
+    ws_thread = threading.Thread(target=start_websocket, daemon=True)
+    ws_thread.start()
+
+    # REST refresh ყოველ 30 წამს (WebSocket backup)
+    def rest_refresh():
+        while True:
+            time.sleep(30)
+            try:
+                fetch_current_prices()
+            except:
+                pass
+
+    rest_thread = threading.Thread(target=rest_refresh, daemon=True)
+    rest_thread.start()
+
+    print("[BG] Background service started!")
+
+
+# ── Public API ────────────────────────────────────
+def get_live_odds():
+    """
+    Dashboard-ისთვის — ყველა NBA live odds
+    """
+    return dict(LIVE_ODDS)
+
+
+def get_odds_for_game(home, away):
+    """
+    კონკრეტული თამაშის odds
+    """
+    h_keys = [home.split()[-1].lower(), home.lower()]
+    a_keys = [away.split()[-1].lower(), away.lower()]
+
+    for mid, odds in LIVE_ODDS.items():
+        q = odds["question"].lower()
         h_match = any(k in q for k in h_keys)
         a_match = any(k in q for k in a_keys)
         if h_match and a_match:
-            return m
-
-    # ერთი გუნდი მაინც
-    for m in poly_markets:
-        q = m["question"].lower()
-        if any(k in q for k in h_keys) or any(k in q for k in a_keys):
-            return m
+            return odds
 
     return None
 
 
-def get_games_with_polymarket_odds():
-    """
-    ESPN თამაშები + Polymarket odds
-    """
-    espn_games = get_todays_games()
-    poly_markets = fetch_polymarket_nba()
-
-    print(f"ESPN games: {len(espn_games)}")
-    print(f"Polymarket NBA markets: {len(poly_markets)}")
-
-    result = []
-
-    for g in espn_games:
-        home, away = g["home"], g["away"]
-        pm = match_game_to_polymarket(home, away, poly_markets)
-
-        if pm:
-            h_o = pm["h_odds"]
-            a_o = pm["a_odds"]
-            source = "polymarket"
-        else:
-            h_o = g.get("h_odds")
-            a_o = g.get("a_odds")
-            source = "espn"
-
-        result.append({
-            "home": home,
-            "away": away,
-            "h_odds": h_o,
-            "a_odds": a_o,
-            "h_open": h_o,
-            "a_open": a_o,
-            "source": source,
-            "poly_question": pm["question"] if pm else None
-        })
-
-    # Polymarket-ის markets რომ ESPN-ში არ არის
-    for pm in poly_markets:
-        q = pm["question"]
-        already = any(
-            match_game_to_polymarket(g["home"], g["away"], [pm])
-            for g in espn_games
-        )
-        if not already:
-            result.append({
-                "home": q[:40],
-                "away": "",
-                "h_odds": pm["h_odds"],
-                "a_odds": pm["a_odds"],
-                "h_open": pm["h_odds"],
-                "a_open": pm["a_odds"],
-                "source": "polymarket_only",
-                "poly_question": q
-            })
-
-    return result, poly_markets
+def get_status():
+    return {
+        "markets":    len(NBA_MARKETS),
+        "live_odds":  len(LIVE_ODDS),
+        "ws_running": _running,
+        "last_update": max((v["updated"] for v in LIVE_ODDS.values()), default="—")
+    }
 
 
-def analyze_games_polymarket():
-    """
-    ბოტის ანალიზი Polymarket odds-ებზე
-    """
-    bk = get_bankroll()
-    games, poly_raw = get_games_with_polymarket_odds()
+# ── Test ──────────────────────────────────────────
+if __name__ == "__main__":
+    print("Testing Polymarket connection...")
+    fetch_nba_markets()
+    print(f"Markets: {len(NBA_MARKETS)}")
+    for mid, info in list(NBA_MARKETS.items())[:5]:
+        print(f"  {info['question']}")
 
-    # Morning odds cache
-    morning = load_morning_odds()
-    if not morning:
-        cache = {}
-        for g in games:
-            key = f"{g['home']}|{g['away']}"
-            cache[key] = {"h": g["h_odds"], "a": g["a_odds"]}
-        save_morning_odds(games)
-        morning = cache
-
-    approved = []
-    log = []
-
-    for g in games:
-        home, away = g["home"], g["away"]
-        h_c, a_c = g["h_odds"], g["a_odds"]
-        if not h_c or not a_c:
-            continue
-
-        key = f"{home}|{away}"
-        h_o = morning.get(key, {}).get("h", h_c)
-        a_o = morning.get(key, {}).get("a", a_c)
-
-        if h_c <= a_c:
-            fav,dog,odds,opf,side,ih = home,away,h_c,h_o,"HOME",True
-        else:
-            fav,dog,odds,opf,side,ih = away,home,a_c,a_o,"AWAY",False
-
-        if not(1.22<=odds<=1.82):
-            log.append(f"SKIP {fav} ({odds}) out of range")
-            continue
-        if side=="AWAY" and odds<1.28:
-            log.append(f"SKIP {fav} ({odds}) away<1.28")
-            continue
-
-        fs=snap(fav,ih); ds=snap(dog,not ih)
-        sh=sharp_sig(opf,odds)
-        mp=ip(odds); p=model_prob(fs,ds,sh)
-        e=round(p-mp,4); ev=round(ev_f(p,odds),4)
-        sc=comp_score(fs,ds,odds,p,mp,sh,side)
-        t=get_tier(sc,e)
-
-        if ev<0.003 or e<0.008 or sc<55 or t=="-":
-            log.append(f"SKIP {fav} EV={ev:+.3f} sc={sc}")
-            continue
-
-        st=get_stake(t,p,odds,bk)
-        if st==0: continue
-
-        trade = {
-            "game": f"{home} vs {away}",
-            "fav": fav, "dog": dog,
-            "odds": odds, "open_odds": opf,
-            "side": side, "tier": t,
-            "score": sc, "edge": e, "ev": ev,
-            "prob": p, "mp": mp,
-            "stake": st, "pot": round(st*(odds-1),2),
-            "sharp": sh["lv"],
-            "sharp_label": sh["lbl"],
-            "source": g.get("source","espn")
-        }
-        approved.append(trade)
-        log.append(f"BET {fav} @ {odds} Tier {t} ${st:.2f} [{g.get('source','')}]")
-
-    # Daily cap
-    if approved:
-        exp = sum(r["stake"] for r in approved)
-        mx = bk * 0.25
-        if exp > mx:
-            ratio = mx/exp
-            for r in approved:
-                r["stake"] = round(r["stake"]*ratio,2)
-                r["pot"] = round(r["stake"]*(r["odds"]-1),2)
-
-    return approved, "\n".join(log), poly_raw
+    print("\nFetching prices...")
+    fetch_current_prices()
+    for mid, odds in list(LIVE_ODDS.items())[:5]:
+        print(f"  {odds['question'][:50]}")
+        print(f"    Home: {odds['h_price']} ({odds['h_odds']}x)")
+        print(f"    Away: {odds['a_price']} ({odds['a_odds']}x)")
