@@ -1,12 +1,7 @@
-# ════════════════════════════════════════════════════
-# bot.py — NBA BOT CORE (V1 Logic)
-# ════════════════════════════════════════════════════
-
 import math, time, json, os, requests
 from datetime import datetime
 import sqlite3
 
-# ── Database ──────────────────────────────────────
 DB = "trades.db"
 
 def init_db():
@@ -14,36 +9,23 @@ def init_db():
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT,
-        game TEXT,
-        fav TEXT,
-        odds REAL,
-        open_odds REAL,
-        sharp INTEGER,
-        sharp_label TEXT,
-        tier TEXT,
-        score REAL,
-        edge REAL,
-        ev REAL,
-        stake REAL,
-        pot REAL,
-        result TEXT DEFAULT 'PENDING',
-        pnl REAL DEFAULT 0,
-        mode TEXT DEFAULT 'paper'
+        timestamp TEXT, game TEXT, fav TEXT,
+        odds REAL, open_odds REAL, sharp INTEGER,
+        sharp_label TEXT, tier TEXT, score REAL,
+        edge REAL, ev REAL, stake REAL, pot REAL,
+        result TEXT DEFAULT 'PENDING', pnl REAL DEFAULT 0,
+        mode TEXT DEFAULT 'paper', source TEXT DEFAULT 'espn'
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS portfolio (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT,
-        bankroll REAL
+        timestamp TEXT, bankroll REAL
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
+        key TEXT PRIMARY KEY, value TEXT
     )""")
-    # Default settings
-    c.execute("INSERT OR IGNORE INTO settings VALUES ('bankroll', '1000.0')")
-    c.execute("INSERT OR IGNORE INTO settings VALUES ('mode', 'paper')")
-    c.execute("INSERT OR IGNORE INTO settings VALUES ('running', 'false')")
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('bankroll','1000.0')")
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('mode','paper')")
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('running','false')")
     conn.commit()
     conn.close()
 
@@ -69,37 +51,35 @@ def save_trade(trade):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("""INSERT INTO trades
-        (timestamp, game, fav, odds, open_odds, sharp, sharp_label,
-         tier, score, edge, ev, stake, pot, mode)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+        (timestamp,game,fav,odds,open_odds,sharp,sharp_label,
+         tier,score,edge,ev,stake,pot,mode,source)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
         datetime.now().strftime("%Y-%m-%d %H:%M"),
         trade['game'], trade['fav'], trade['odds'], trade['open_odds'],
         trade['sharp'], trade['sharp_label'], trade['tier'],
         trade['score'], trade['edge'], trade['ev'],
-        trade['stake'], trade['pot'], get_setting('mode')
+        trade['stake'], trade['pot'],
+        get_setting('mode'), trade.get('source','espn')
     ))
-    trade_id = c.lastrowid
+    tid = c.lastrowid
     conn.commit()
     conn.close()
-    return trade_id
+    return tid
 
 def update_result(trade_id, won):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("SELECT stake, odds FROM trades WHERE id=?", (trade_id,))
+    c.execute("SELECT stake,odds FROM trades WHERE id=?", (trade_id,))
     row = c.fetchone()
     if row:
         stake, odds = row
-        pnl = round(stake*(odds-1), 2) if won else -stake
-        result = 'WIN' if won else 'LOSS'
-        c.execute("UPDATE trades SET result=?, pnl=? WHERE id=?",
-                  (result, pnl, trade_id))
-        bk = get_bankroll()
-        new_bk = round(bk + pnl, 2)
-        set_setting('bankroll', new_bk)
-        # Portfolio snapshot
-        c.execute("INSERT INTO portfolio (timestamp, bankroll) VALUES (?,?)",
-                  (datetime.now().strftime("%Y-%m-%d %H:%M"), new_bk))
+        pnl = round(stake*(odds-1),2) if won else -stake
+        c.execute("UPDATE trades SET result=?,pnl=? WHERE id=?",
+                  ('WIN' if won else 'LOSS', pnl, trade_id))
+        bk = round(get_bankroll()+pnl, 2)
+        set_setting('bankroll', bk)
+        c.execute("INSERT INTO portfolio (timestamp,bankroll) VALUES (?,?)",
+                  (datetime.now().strftime("%Y-%m-%d %H:%M"), bk))
         conn.commit()
     conn.close()
 
@@ -111,13 +91,13 @@ def get_trades(limit=50):
     conn.close()
     cols = ['id','timestamp','game','fav','odds','open_odds','sharp',
             'sharp_label','tier','score','edge','ev','stake','pot',
-            'result','pnl','mode']
-    return [dict(zip(cols, r)) for r in rows]
+            'result','pnl','mode','source']
+    return [dict(zip(cols,r)) for r in rows]
 
 def get_portfolio_history():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("SELECT timestamp, bankroll FROM portfolio ORDER BY id")
+    c.execute("SELECT timestamp,bankroll FROM portfolio ORDER BY id")
     rows = c.fetchall()
     conn.close()
     return rows
@@ -132,30 +112,22 @@ def get_stats():
     c.execute("SELECT COUNT(*) FROM trades WHERE result='WIN'")
     wins = c.fetchone()[0]
     c.execute("SELECT SUM(pnl) FROM trades WHERE result!='PENDING'")
-    total_pnl = c.fetchone()[0] or 0
+    tpnl = c.fetchone()[0] or 0
     c.execute("SELECT COUNT(*) FROM trades WHERE DATE(timestamp)=DATE('now')")
     daily = c.fetchone()[0]
     c.execute("SELECT SUM(pnl) FROM trades WHERE DATE(timestamp)=DATE('now') AND result!='PENDING'")
-    daily_pnl = c.fetchone()[0] or 0
+    dpnl = c.fetchone()[0] or 0
     conn.close()
     bk = get_bankroll()
     return {
-        'bankroll': bk,
-        'total_value': bk,
-        'pnl': round(total_pnl, 2),
-        'daily_pnl': round(daily_pnl, 2),
-        'open_positions': open_pos,
-        'daily_trades': daily,
-        'total_trades': total,
-        'win_rate': round(wins/total*100, 1) if total > 0 else 0,
-        'wins': wins,
-        'losses': total - wins,
-        'mode': get_setting('mode'),
-        'running': get_setting('running') == 'true'
+        'bankroll': bk, 'pnl': round(tpnl,2),
+        'daily_pnl': round(dpnl,2), 'open_positions': open_pos,
+        'daily_trades': daily, 'total_trades': total,
+        'win_rate': round(wins/total*100,1) if total>0 else 0,
+        'wins': wins, 'losses': total-wins,
+        'mode': get_setting('mode'), 'running': get_setting('running')=='true'
     }
 
-
-# ── Bot Stats ──────────────────────────────────────
 STATS = {
     "Detroit Pistons":        {"elo":1720,"net":12.4,"def":107.2,"off":119.6,"vol":7.4,"h2h_h":0.72,"h2h_a":0.62},
     "Oklahoma City Thunder":  {"elo":1710,"net":13.2,"def":107.4,"off":120.6,"vol":7.2,"h2h_h":0.70,"h2h_a":0.62},
@@ -195,8 +167,9 @@ def kelly(p,o): return max(0.0,((o-1)*p-(1-p))/(o-1)) if o>1 else 0.0
 def ev_f(p,o): return p*(o-1)-(1-p)
 
 def snap(team, is_home):
-    s=STATS.get(team,{})
-    if not s: return {"elo":1500,"net":0,"defr":112,"off":112,"vol":9,"h2h":0.5,"rest":3,"b2b":False,"is_home":is_home}
+    s = STATS.get(team,{})
+    if not s:
+        return {"elo":1500,"net":0,"defr":112,"off":112,"vol":9,"h2h":0.5,"rest":3,"b2b":False,"is_home":is_home}
     return {"elo":s["elo"],"net":s["net"],"defr":s["def"],"off":s["off"],
             "vol":s["vol"],"h2h":s["h2h_h"] if is_home else s["h2h_a"],
             "rest":3,"b2b":False,"is_home":is_home}
@@ -251,50 +224,13 @@ def get_stake(t,p,odds,bk):
     if not f: return 0.0
     return round(max(12,min(bk*0.12,bk*kelly(p,odds)*f)),2)
 
-
-# ── ESPN Games ────────────────────────────────────
-def get_todays_games():
-    today = datetime.now().strftime("%Y%m%d")
-    url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={today}"
-    try:
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        games = []
-        for event in data.get("events", []):
-            comp = event["competitions"][0]
-            if comp["status"]["type"]["name"] == "STATUS_FINAL":
-                continue
-            competitors = comp["competitors"]
-            home = next((c for c in competitors if c["homeAway"]=="home"), competitors[0])
-            away = next((c for c in competitors if c["homeAway"]=="away"), competitors[1])
-            odds_list = comp.get("odds", [])
-            o = odds_list[0] if odds_list else {}
-            def ml(x):
-                if x is None: return None
-                x=float(x)
-                return round(1+x/100,2) if x>0 else round(1+100/abs(x),2)
-            h = ml(o.get("homeTeamOdds",{}).get("moneyLine"))
-            a = ml(o.get("awayTeamOdds",{}).get("moneyLine"))
-            if h and a:
-                games.append({
-                    "home": home["team"]["displayName"],
-                    "away": away["team"]["displayName"],
-                    "h_odds": h, "a_odds": a,
-                    "h_open": h, "a_open": a
-                })
-        return games
-    except:
-        return []
-
-
-# ── Morning Odds Cache ────────────────────────────
 ODDS_CACHE = "/tmp/morning_odds.json"
 
 def save_morning_odds(games):
     data = {}
     for g in games:
         key = f"{g['home']}|{g['away']}"
-        data[key] = {"h": g["h_odds"], "a": g["a_odds"]}
+        data[key] = {"h": g.get("h_odds"), "a": g.get("a_odds")}
     with open(ODDS_CACHE,"w") as f:
         json.dump({"time": datetime.now().isoformat(), "odds": data}, f)
 
@@ -303,18 +239,41 @@ def load_morning_odds():
     try:
         d = json.load(open(ODDS_CACHE))
         hours = (datetime.now()-datetime.fromisoformat(d["time"])).total_seconds()/3600
-        return d["odds"] if hours < 22 else {}
+        return d["odds"] if hours<22 else {}
     except: return {}
 
+def get_todays_games():
+    today = datetime.now().strftime("%Y%m%d")
+    url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={today}"
+    try:
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        games = []
+        for event in data.get("events",[]):
+            comp = event["competitions"][0]
+            if comp["status"]["type"]["name"]=="STATUS_FINAL": continue
+            competitors = comp["competitors"]
+            home = next((c for c in competitors if c["homeAway"]=="home"), competitors[0])
+            away = next((c for c in competitors if c["homeAway"]=="away"), competitors[1])
+            odds_list = comp.get("odds",[])
+            o = odds_list[0] if odds_list else {}
+            def ml(x):
+                if x is None: return None
+                x=float(x)
+                return round(1+x/100,2) if x>0 else round(1+100/abs(x),2)
+            h = ml(o.get("homeTeamOdds",{}).get("moneyLine"))
+            a = ml(o.get("awayTeamOdds",{}).get("moneyLine"))
+            games.append({
+                "home": home["team"]["displayName"],
+                "away": away["team"]["displayName"],
+                "h_odds": h, "a_odds": a
+            })
+        return games
+    except: return []
 
-# ── Main Analysis ─────────────────────────────────
-def analyze_games():
+def analyze_games(games_with_odds=None):
     bk = get_bankroll()
-    games = get_todays_games()
-
-    if not games:
-        return [], "ESPN: თამაშები ვერ ჩამოიტვირთა"
-
+    games = games_with_odds or get_todays_games()
     morning = load_morning_odds()
     if not morning:
         save_morning_odds(games)
@@ -323,22 +282,25 @@ def analyze_games():
     log = []
 
     for g in games:
-        home, away = g["home"], g["away"]
-        h_c, a_c = g["h_odds"], g["a_odds"]
-        key = f"{home}|{away}"
-        h_o = morning.get(key, {}).get("h", h_c)
-        a_o = morning.get(key, {}).get("a", a_c)
+        home,away = g["home"],g["away"]
+        h_c = g.get("h_odds")
+        a_c = g.get("a_odds")
+        if not h_c or not a_c: continue
 
-        if h_c <= a_c:
-            fav,dog,odds,opf,side,ih = home,away,h_c,h_o,"HOME",True
+        key = f"{home}|{away}"
+        h_o = morning.get(key,{}).get("h", h_c)
+        a_o = morning.get(key,{}).get("a", a_c)
+
+        if h_c<=a_c:
+            fav,dog,odds,opf,side,ih=home,away,h_c,h_o,"HOME",True
         else:
-            fav,dog,odds,opf,side,ih = away,home,a_c,a_o,"AWAY",False
+            fav,dog,odds,opf,side,ih=away,home,a_c,a_o,"AWAY",False
 
         if not(1.22<=odds<=1.82):
-            log.append(f"SKIP: {fav} ({odds}) — out of range")
+            log.append(f"SKIP {fav} ({odds}) out of range")
             continue
         if side=="AWAY" and odds<1.28:
-            log.append(f"SKIP: {fav} ({odds}) — away < 1.28")
+            log.append(f"SKIP {fav} away<1.28")
             continue
 
         fs=snap(fav,ih); ds=snap(dog,not ih)
@@ -349,11 +311,11 @@ def analyze_games():
         t=get_tier(sc,e)
 
         if ev<0.003 or e<0.008 or sc<55 or t=="-":
-            log.append(f"SKIP: {fav} ({odds}) — EV={ev:+.3f} Score={sc}")
+            log.append(f"SKIP {fav} EV={ev:+.3f} sc={sc}")
             continue
 
-        st = get_stake(t,p,odds,bk)
-        if st == 0: continue
+        st=get_stake(t,p,odds,bk)
+        if st==0: continue
 
         trade = {
             "game": f"{home} vs {away}",
@@ -363,28 +325,18 @@ def analyze_games():
             "score": sc, "edge": e, "ev": ev,
             "prob": p, "mp": mp,
             "stake": st, "pot": round(st*(odds-1),2),
-            "sharp": sh["lv"],
-            "sharp_label": sh["lbl"],
+            "sharp": sh["lv"], "sharp_label": sh["lbl"],
+            "source": g.get("source","espn")
         }
         approved.append(trade)
-        log.append(f"BET: {fav} @ {odds} | Tier {t} | ${st:.2f}")
+        log.append(f"BET {fav} @ {odds} Tier {t} ${st:.2f}")
 
-    # Daily cap
     if approved:
-        exp = sum(r["stake"] for r in approved)
-        mx = bk * 0.25
-        if exp > mx:
-            ratio = mx/exp
+        exp=sum(r["stake"] for r in approved); mx=bk*0.25
+        if exp>mx:
+            ratio=mx/exp
             for r in approved:
-                r["stake"] = round(r["stake"]*ratio,2)
-                r["pot"] = round(r["stake"]*(r["odds"]-1),2)
+                r["stake"]=round(r["stake"]*ratio,2)
+                r["pot"]=round(r["stake"]*(r["odds"]-1),2)
 
     return approved, "\n".join(log)
-
-
-if __name__ == "__main__":
-    init_db()
-    print("Database initialized")
-    trades, log = analyze_games()
-    print(f"Found {len(trades)} bets")
-    print(log)
