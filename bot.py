@@ -14,7 +14,7 @@ def init_db():
         sharp_label TEXT, tier TEXT, score REAL,
         edge REAL, ev REAL, stake REAL, pot REAL,
         result TEXT DEFAULT 'PENDING', pnl REAL DEFAULT 0,
-        mode TEXT DEFAULT 'paper', source TEXT DEFAULT 'espn'
+        mode TEXT DEFAULT 'paper', source TEXT DEFAULT 'odds_api'
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS portfolio (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,7 +59,7 @@ def save_trade(trade):
         trade['sharp'], trade['sharp_label'], trade['tier'],
         trade['score'], trade['edge'], trade['ev'],
         trade['stake'], trade['pot'],
-        get_setting('mode'), trade.get('source','espn')
+        get_setting('mode'), trade.get('source','odds_api')
     ))
     tid = c.lastrowid
     conn.commit()
@@ -125,8 +125,177 @@ def get_stats():
         'daily_trades': daily, 'total_trades': total,
         'win_rate': round(wins/total*100,1) if total>0 else 0,
         'wins': wins, 'losses': total-wins,
-        'mode': get_setting('mode'), 'running': get_setting('running')=='true'
+        'mode': get_setting('mode'),
+        'running': get_setting('running')=='true'
     }
+
+# ════════════════════════════════════════
+# THE ODDS API — NBA Games + Odds
+# ════════════════════════════════════════
+
+ODDS_CACHE_FILE = "/tmp/odds_cache.json"
+OPENING_CACHE_FILE = "/tmp/opening_odds.json"
+
+def get_nba_odds_from_api():
+    """
+    The Odds API-დან NBA odds ამოღება
+    Polymarket bookmaker-ის კოეფიციენტები
+    """
+    api_key = os.environ.get("ODDS_API_KEY", "")
+    if not api_key:
+        print("[ODDS] No API key found")
+        return []
+
+    url = "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
+    params = {
+        "apiKey":      api_key,
+        "regions":     "us",
+        "markets":     "h2h",
+        "oddsFormat":  "decimal",
+        "dateFormat":  "iso",
+        "bookmakers":  "draftkings,fanduel,betmgm,pointsbet"
+    }
+
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        print(f"[ODDS] Status: {r.status_code}")
+        remaining = r.headers.get("x-requests-remaining","?")
+        print(f"[ODDS] Requests remaining: {remaining}")
+
+        if r.status_code != 200:
+            print(f"[ODDS] Error: {r.text[:200]}")
+            return []
+
+        games = []
+        for event in r.json():
+            home = event.get("home_team","")
+            away = event.get("away_team","")
+            commence = event.get("commence_time","")
+
+            # odds-ების ამოღება
+            best_h = best_a = None
+            bookmakers = event.get("bookmakers",[])
+            if bookmakers:
+                bm = bookmakers[0]
+                for market in bm.get("markets",[]):
+                    if market["key"] == "h2h":
+                        outcomes = market.get("outcomes",[])
+                        for o in outcomes:
+                            if o["name"] == home:
+                                best_h = round(o["price"],2)
+                            elif o["name"] == away:
+                                best_a = round(o["price"],2)
+
+            if best_h and best_a:
+                games.append({
+                    "home":    home,
+                    "away":    away,
+                    "h_odds":  best_h,
+                    "a_odds":  best_a,
+                    "time":    commence,
+                    "source":  "odds_api"
+                })
+
+        # Cache-ში შენახვა
+        with open(ODDS_CACHE_FILE,"w") as f:
+            json.dump({
+                "time": datetime.now().isoformat(),
+                "games": games
+            }, f)
+
+        # Opening odds შენახვა (პირველი გაშვება)
+        if not os.path.exists(OPENING_CACHE_FILE):
+            opening = {g["home"]+"|"+g["away"]: {
+                "h": g["h_odds"], "a": g["a_odds"]
+            } for g in games}
+            with open(OPENING_CACHE_FILE,"w") as f:
+                json.dump({
+                    "time": datetime.now().isoformat(),
+                    "odds": opening
+                }, f)
+            print(f"[ODDS] Opening odds saved: {len(opening)} games")
+
+        print(f"[ODDS] Games loaded: {len(games)}")
+        return games
+
+    except Exception as e:
+        print(f"[ODDS] Exception: {e}")
+        return []
+
+
+def get_opening_odds():
+    """Opening odds ჩატვირთვა"""
+    if not os.path.exists(OPENING_CACHE_FILE):
+        return {}
+    try:
+        d = json.load(open(OPENING_CACHE_FILE))
+        hours = (datetime.now()-datetime.fromisoformat(d["time"])).total_seconds()/3600
+        if hours > 24:
+            os.remove(OPENING_CACHE_FILE)
+            return {}
+        return d["odds"]
+    except:
+        return {}
+
+
+def reset_opening_odds():
+    """Opening odds გადაყენება (ახალი დღე)"""
+    if os.path.exists(OPENING_CACHE_FILE):
+        os.remove(OPENING_CACHE_FILE)
+    print("[ODDS] Opening odds reset")
+
+
+def get_cached_games():
+    """Cache-დან games"""
+    if not os.path.exists(ODDS_CACHE_FILE):
+        return []
+    try:
+        d = json.load(open(ODDS_CACHE_FILE))
+        mins = (datetime.now()-datetime.fromisoformat(d["time"])).total_seconds()/60
+        if mins > 30:
+            return []
+        return d["games"]
+    except:
+        return []
+
+
+def get_todays_games():
+    """ESPN-დან games (fallback)"""
+    today = datetime.now().strftime("%Y%m%d")
+    url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={today}"
+    try:
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        games = []
+        for event in data.get("events",[]):
+            comp = event["competitions"][0]
+            if comp["status"]["type"]["name"]=="STATUS_FINAL": continue
+            competitors = comp["competitors"]
+            home = next((c for c in competitors if c["homeAway"]=="home"), competitors[0])
+            away = next((c for c in competitors if c["homeAway"]=="away"), competitors[1])
+            odds_list = comp.get("odds",[])
+            o = odds_list[0] if odds_list else {}
+            def ml(x):
+                if x is None: return None
+                x=float(x)
+                return round(1+x/100,2) if x>0 else round(1+100/abs(x),2)
+            h = ml(o.get("homeTeamOdds",{}).get("moneyLine"))
+            a = ml(o.get("awayTeamOdds",{}).get("moneyLine"))
+            if h and a:
+                games.append({
+                    "home": home["team"]["displayName"],
+                    "away": away["team"]["displayName"],
+                    "h_odds": h, "a_odds": a,
+                    "source": "espn"
+                })
+        return games
+    except:
+        return []
+
+
+# ════════════════════════════════════════
+# V1 BOT LOGIC
+# ════════════════════════════════════════
 
 STATS = {
     "Detroit Pistons":        {"elo":1720,"net":12.4,"def":107.2,"off":119.6,"vol":7.4,"h2h_h":0.72,"h2h_a":0.62},
@@ -169,7 +338,8 @@ def ev_f(p,o): return p*(o-1)-(1-p)
 def snap(team, is_home):
     s = STATS.get(team,{})
     if not s:
-        return {"elo":1500,"net":0,"defr":112,"off":112,"vol":9,"h2h":0.5,"rest":3,"b2b":False,"is_home":is_home}
+        return {"elo":1500,"net":0,"defr":112,"off":112,"vol":9,
+                "h2h":0.5,"rest":3,"b2b":False,"is_home":is_home}
     return {"elo":s["elo"],"net":s["net"],"defr":s["def"],"off":s["off"],
             "vol":s["vol"],"h2h":s["h2h_h"] if is_home else s["h2h_a"],
             "rest":3,"b2b":False,"is_home":is_home}
@@ -178,14 +348,17 @@ def sharp_sig(oph, odds):
     if not oph or abs(oph-odds)<0.001:
         return {"lv":0,"bonus":0,"drop":0,"lbl":"—"}
     dr=(oph-odds)/oph; ipd=ip(odds)-ip(oph)
-    if dr>=0.025 and ipd>=0.012: return {"lv":2,"bonus":14,"drop":round(dr,4),"lbl":"Strong"}
-    if dr>=0.012 and ipd>=0.007: return {"lv":1,"bonus":6,"drop":round(dr,4),"lbl":"Medium"}
+    if dr>=0.025 and ipd>=0.012:
+        return {"lv":2,"bonus":14,"drop":round(dr,4),"lbl":"Strong"}
+    if dr>=0.012 and ipd>=0.007:
+        return {"lv":1,"bonus":6,"drop":round(dr,4),"lbl":"Medium"}
     return {"lv":0,"bonus":0,"drop":round(dr,4),"lbl":"—"}
 
 def model_prob(f,d,sh):
     raw=(f["elo"]-d["elo"])*0.012+(f["net"]-d["net"])*0.165
     raw+=(f["rest"]-d["rest"])*0.62+(f["h2h"]-0.5)*100*0.022
-    raw+=(d["vol"]-f["vol"])*0.175+(3.0 if f["is_home"] else -1.2)+sh["bonus"]*0.28
+    raw+=(d["vol"]-f["vol"])*0.175
+    raw+=(3.0 if f["is_home"] else -1.2)+sh["bonus"]*0.28
     return round(sigmoid(raw/10.4),4)
 
 def comp_score(f,d,odds,p,mp,sh,side):
@@ -224,72 +397,33 @@ def get_stake(t,p,odds,bk):
     if not f: return 0.0
     return round(max(12,min(bk*0.12,bk*kelly(p,odds)*f)),2)
 
-ODDS_CACHE = "/tmp/morning_odds.json"
 
-def save_morning_odds(games):
-    data = {}
-    for g in games:
-        key = f"{g['home']}|{g['away']}"
-        data[key] = {"h": g.get("h_odds"), "a": g.get("a_odds")}
-    with open(ODDS_CACHE,"w") as f:
-        json.dump({"time": datetime.now().isoformat(), "odds": data}, f)
-
-def load_morning_odds():
-    if not os.path.exists(ODDS_CACHE): return {}
-    try:
-        d = json.load(open(ODDS_CACHE))
-        hours = (datetime.now()-datetime.fromisoformat(d["time"])).total_seconds()/3600
-        return d["odds"] if hours<22 else {}
-    except: return {}
-
-def get_todays_games():
-    today = datetime.now().strftime("%Y%m%d")
-    url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={today}"
-    try:
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        games = []
-        for event in data.get("events",[]):
-            comp = event["competitions"][0]
-            if comp["status"]["type"]["name"]=="STATUS_FINAL": continue
-            competitors = comp["competitors"]
-            home = next((c for c in competitors if c["homeAway"]=="home"), competitors[0])
-            away = next((c for c in competitors if c["homeAway"]=="away"), competitors[1])
-            odds_list = comp.get("odds",[])
-            o = odds_list[0] if odds_list else {}
-            def ml(x):
-                if x is None: return None
-                x=float(x)
-                return round(1+x/100,2) if x>0 else round(1+100/abs(x),2)
-            h = ml(o.get("homeTeamOdds",{}).get("moneyLine"))
-            a = ml(o.get("awayTeamOdds",{}).get("moneyLine"))
-            games.append({
-                "home": home["team"]["displayName"],
-                "away": away["team"]["displayName"],
-                "h_odds": h, "a_odds": a
-            })
-        return games
-    except: return []
-
-def analyze_games(games_with_odds=None):
+def analyze_games(games_override=None):
     bk = get_bankroll()
-    games = games_with_odds or get_todays_games()
-    morning = load_morning_odds()
-    if not morning:
-        save_morning_odds(games)
 
+    # Odds ამოღება
+    if games_override:
+        games = games_override
+    else:
+        games = get_cached_games()
+        if not games:
+            games = get_nba_odds_from_api()
+        if not games:
+            games = get_todays_games()
+
+    opening = get_opening_odds()
     approved = []
     log = []
 
     for g in games:
-        home,away = g["home"],g["away"]
+        home, away = g["home"], g["away"]
         h_c = g.get("h_odds")
         a_c = g.get("a_odds")
         if not h_c or not a_c: continue
 
         key = f"{home}|{away}"
-        h_o = morning.get(key,{}).get("h", h_c)
-        a_o = morning.get(key,{}).get("a", a_c)
+        h_o = opening.get(key,{}).get("h", h_c)
+        a_o = opening.get(key,{}).get("a", a_c)
 
         if h_c<=a_c:
             fav,dog,odds,opf,side,ih=home,away,h_c,h_o,"HOME",True
@@ -297,7 +431,7 @@ def analyze_games(games_with_odds=None):
             fav,dog,odds,opf,side,ih=away,home,a_c,a_o,"AWAY",False
 
         if not(1.22<=odds<=1.82):
-            log.append(f"SKIP {fav} ({odds}) out of range")
+            log.append(f"SKIP {fav} ({odds}) range")
             continue
         if side=="AWAY" and odds<1.28:
             log.append(f"SKIP {fav} away<1.28")
@@ -317,7 +451,7 @@ def analyze_games(games_with_odds=None):
         st=get_stake(t,p,odds,bk)
         if st==0: continue
 
-        trade = {
+        approved.append({
             "game": f"{home} vs {away}",
             "fav": fav, "dog": dog,
             "odds": odds, "open_odds": opf,
@@ -326,13 +460,13 @@ def analyze_games(games_with_odds=None):
             "prob": p, "mp": mp,
             "stake": st, "pot": round(st*(odds-1),2),
             "sharp": sh["lv"], "sharp_label": sh["lbl"],
-            "source": g.get("source","espn")
-        }
-        approved.append(trade)
-        log.append(f"BET {fav} @ {odds} Tier {t} ${st:.2f}")
+            "source": g.get("source","odds_api")
+        })
+        log.append(f"BET {fav}@{odds} T{t} ${st:.0f}")
 
     if approved:
-        exp=sum(r["stake"] for r in approved); mx=bk*0.25
+        exp=sum(r["stake"] for r in approved)
+        mx=bk*0.25
         if exp>mx:
             ratio=mx/exp
             for r in approved:
