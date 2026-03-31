@@ -1,440 +1,425 @@
-import bot
+import bot, polymarket_scraper, threading, time
 import dash
-from dash import dcc, html, Input, Output, State, callback_context
+from dash import dcc, html, Input, Output, callback_context
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from datetime import datetime
 
 bot.init_db()
 
-app = dash.Dash(
-    __name__,
+def bg():
+    while True:
+        try:
+            games = polymarket_scraper.scrape_polymarket()
+            if games:
+                bot.save_price_history(games)
+        except Exception as e:
+            print(f"[BG] {e}")
+        time.sleep(60)
+
+threading.Thread(target=bg, daemon=True).start()
+
+app = dash.Dash(__name__,
     external_stylesheets=[dbc.themes.CYBORG],
     title="NBA Polymarket Agent",
-    suppress_callback_exceptions=True
-)
+    suppress_callback_exceptions=True)
 server = app.server
 
-C = {
-    "bg":      "#0d1117",
-    "card":    "#161b22",
-    "card2":   "#1c2128",
-    "border":  "#30363d",
-    "green":   "#2ea043",
-    "green2":  "#3fb950",
-    "red":     "#da3633",
-    "blue":    "#58a6ff",
-    "yellow":  "#d29922",
-    "purple":  "#8b949e",
-    "text":    "#e6edf3",
-    "muted":   "#8b949e",
-    "success": "#238636",
-}
+BG    = "#111827"
+CARD  = "#1f2937"
+BORD  = "#374151"
+GREEN = "#10b981"
+RED   = "#ef4444"
+BLUE  = "#3b82f6"
+TEXT  = "#f9fafb"
+MUTED = "#6b7280"
+YEL   = "#f59e0b"
 
-def mk_card(title, val_id, sub=""):
+def stat(title, vid, sub=""):
     return html.Div([
-        html.P(title, style={
-            "color":C["muted"],"fontSize":"11px","fontWeight":"600",
-            "letterSpacing":"0.5px","marginBottom":"6px","textTransform":"uppercase"
-        }),
-        html.H2("—", id=val_id, style={
-            "color":C["text"],"fontWeight":"700",
-            "fontSize":"24px","marginBottom":"2px","fontFamily":"monospace"
-        }),
-        html.P(sub, style={"color":C["muted"],"fontSize":"11px","marginBottom":"0"}),
-    ], style={
-        "background":C["card"],"border":f"1px solid {C['border']}",
-        "borderRadius":"8px","padding":"14px 18px"
-    })
+        html.P(title, style={"color":MUTED,"fontSize":"10px","fontWeight":"600",
+                             "letterSpacing":"1px","textTransform":"uppercase","marginBottom":"4px"}),
+        html.H3("--", id=vid, style={"color":TEXT,"fontWeight":"700","fontSize":"20px",
+                                     "fontFamily":"monospace","marginBottom":"0"}),
+        html.P(sub, style={"color":MUTED,"fontSize":"9px","marginBottom":"0","marginTop":"2px"}),
+    ], style={"background":CARD,"border":f"1px solid {BORD}","borderRadius":"10px","padding":"14px 16px"})
 
 app.layout = html.Div([
 
-    # Header
     html.Div([
         html.Div([
-            html.Span("●", id="run-dot",
-                style={"color":C["green"],"fontSize":"10px","marginRight":"6px"}),
-            html.Span("NBA", style={"color":C["text"],"fontWeight":"700","fontSize":"18px"}),
-            html.Span(" Polymarket Agent",
-                style={"color":C["blue"],"fontWeight":"700","fontSize":"18px"}),
-            html.Span("PAPER MODE", id="mode-badge", style={
-                "background":C["yellow"],"color":"#000","padding":"2px 10px",
-                "borderRadius":"4px","fontSize":"11px","fontWeight":"700","marginLeft":"12px"
+            html.Span("●", id="dot", style={"color":GREEN,"fontSize":"12px","marginRight":"8px"}),
+            html.Span("NBA", style={"color":TEXT,"fontWeight":"800","fontSize":"18px","letterSpacing":"2px"}),
+            html.Span(" POLYMARKET", style={"color":BLUE,"fontWeight":"800","fontSize":"18px","letterSpacing":"2px"}),
+            html.Span(" AGENT", style={"color":MUTED,"fontSize":"14px","marginLeft":"6px"}),
+            html.Span("PAPER", id="mbadge", style={
+                "background":YEL,"color":"#000","padding":"2px 10px",
+                "borderRadius":"12px","fontSize":"9px","fontWeight":"800","marginLeft":"12px"
             }),
         ], style={"display":"flex","alignItems":"center","flex":"1"}),
-        html.Div([
-            html.Span(id="api-status",
-                style={"color":C["muted"],"fontSize":"11px","marginRight":"16px"}),
-            html.Span(id="refresh-time",
-                style={"color":C["muted"],"fontSize":"12px"}),
-        ], style={"display":"flex","alignItems":"center"}),
-    ], style={
-        "display":"flex","justifyContent":"space-between","alignItems":"center",
-        "padding":"12px 24px","borderBottom":f"1px solid {C['border']}",
-        "background":C["card"]
-    }),
+        html.Span(id="rtime", style={"color":MUTED,"fontSize":"11px","fontFamily":"monospace"}),
+    ], style={"display":"flex","justifyContent":"space-between","alignItems":"center",
+              "padding":"12px 24px","borderBottom":f"1px solid {BORD}","background":CARD}),
 
     html.Div([
 
-        # Stat Cards
         html.Div([
-            mk_card("TOTAL VALUE",    "s-bankroll",  "portfolio"),
-            mk_card("DAILY P&L",      "s-dpnl",      "today"),
-            mk_card("TOTAL P&L",      "s-tpnl",      "all time"),
-            mk_card("OPEN POSITIONS", "s-open",      "active"),
-            mk_card("WIN RATE",       "s-wr",        "completed"),
-            mk_card("DAILY TRADES",   "s-daily",     "today"),
-        ], style={
-            "display":"grid","gridTemplateColumns":"repeat(6,1fr)",
-            "gap":"10px","marginBottom":"14px"
-        }),
+            stat("BANKROLL","s-bk","total"),
+            stat("DAILY P&L","s-dp","today"),
+            stat("TOTAL P&L","s-tp","all time"),
+            stat("OPEN","s-op","positions"),
+            stat("WIN RATE","s-wr","completed"),
+            stat("TODAY","s-td","trades"),
+        ], style={"display":"grid","gridTemplateColumns":"repeat(6,1fr)","gap":"10px","marginBottom":"14px"}),
 
-        # Controls
         html.Div([
             html.Div([
-                html.Button("▶ Run Analysis", id="btn-run", style={
-                    "background":C["success"],"color":"#fff","border":"none",
-                    "padding":"8px 18px","borderRadius":"6px","fontSize":"13px",
-                    "fontWeight":"600","cursor":"pointer","marginRight":"8px"
-                }),
-                html.Button("⏸ Pause", id="btn-pause", style={
-                    "background":"transparent","color":C["text"],
-                    "border":f"1px solid {C['border']}","padding":"8px 16px",
-                    "borderRadius":"6px","fontSize":"13px","cursor":"pointer","marginRight":"8px"
-                }),
-                html.Button("🔄 Refresh Odds", id="btn-refresh", style={
-                    "background":"transparent","color":C["blue"],
-                    "border":f"1px solid {C['blue']}","padding":"8px 16px",
-                    "borderRadius":"6px","fontSize":"13px","cursor":"pointer","marginRight":"8px"
-                }),
-                html.Button("🗑 Reset Opening", id="btn-reset", style={
-                    "background":"transparent","color":C["yellow"],
-                    "border":f"1px solid {C['yellow']}","padding":"8px 16px",
-                    "borderRadius":"6px","fontSize":"13px","cursor":"pointer"
-                }),
+                html.Button("RUN", id="btn-run", style={
+                    "background":GREEN,"color":"#000","border":"none",
+                    "padding":"8px 18px","borderRadius":"8px","fontSize":"12px",
+                    "fontWeight":"700","cursor":"pointer","marginRight":"8px"}),
+                html.Button("REFRESH", id="btn-ref", style={
+                    "background":"transparent","color":BLUE,"border":f"1px solid {BLUE}",
+                    "padding":"8px 14px","borderRadius":"8px","fontSize":"12px",
+                    "cursor":"pointer","marginRight":"8px"}),
+                html.Button("RESET", id="btn-rst", style={
+                    "background":"transparent","color":MUTED,"border":f"1px solid {BORD}",
+                    "padding":"8px 14px","borderRadius":"8px","fontSize":"12px","cursor":"pointer"}),
             ]),
             html.Div([
-                html.Span("Paper", style={"color":C["muted"],"fontSize":"13px","marginRight":"8px"}),
-                dbc.Switch(id="mode-switch", value=False),
-                html.Span("Live", style={"color":C["muted"],"fontSize":"13px","marginLeft":"8px"}),
+                html.Span("Paper", style={"color":MUTED,"fontSize":"11px","marginRight":"8px"}),
+                dbc.Switch(id="msw", value=False),
+                html.Span("Live", style={"color":MUTED,"fontSize":"11px","marginLeft":"8px"}),
             ], style={"display":"flex","alignItems":"center"}),
-        ], style={
-            "display":"flex","justifyContent":"space-between",
-            "alignItems":"center","marginBottom":"14px"
-        }),
+        ], style={"display":"flex","justifyContent":"space-between","alignItems":"center","marginBottom":"14px"}),
 
         html.Div([
 
-            # LEFT COLUMN
             html.Div([
 
-                # Today's NBA Games + Odds
                 html.Div([
                     html.Div([
-                        html.Span("Today's NBA Games", style={"fontWeight":"600","fontSize":"14px"}),
-                        html.Span(id="games-count", style={
-                            "background":C["blue"],"color":"#fff","padding":"1px 8px",
-                            "borderRadius":"10px","fontSize":"11px","float":"right"
-                        }),
-                    ], style={"padding":"12px 16px","borderBottom":f"1px solid {C['border']}"}),
-                    html.Div(id="games-list", style={"maxHeight":"320px","overflowY":"auto"}),
-                ], style={
-                    "background":C["card"],"border":f"1px solid {C['border']}",
-                    "borderRadius":"8px","marginBottom":"12px"
-                }),
+                        html.Span("● ", style={"color":GREEN,"fontSize":"8px"}),
+                        html.Span("WIN PROBABILITY — POLYMARKET",
+                            style={"fontWeight":"700","fontSize":"11px","letterSpacing":"1.5px"}),
+                    ], style={"padding":"12px 16px","borderBottom":f"1px solid {BORD}"}),
+                    html.Div(id="pm-charts", style={"padding":"8px"}),
+                ], style={"background":CARD,"border":f"1px solid {BORD}","borderRadius":"10px","marginBottom":"12px"}),
 
-                # Bot Recommendations
                 html.Div([
                     html.Div([
-                        html.Span("Bot Recommendations", style={"fontWeight":"600","fontSize":"14px"}),
-                        html.Span(id="rec-count", style={
-                            "background":C["green"],"color":"#fff","padding":"1px 8px",
-                            "borderRadius":"10px","fontSize":"11px","float":"right"
-                        }),
-                    ], style={"padding":"12px 16px","borderBottom":f"1px solid {C['border']}"}),
+                        html.Span("BOT ANALYSIS",
+                            style={"fontWeight":"700","fontSize":"11px","letterSpacing":"1.5px"}),
+                        html.Span(id="rec-cnt", style={
+                            "background":GREEN,"color":"#000","padding":"1px 10px",
+                            "borderRadius":"10px","fontSize":"9px","fontWeight":"800","float":"right"}),
+                    ], style={"padding":"12px 16px","borderBottom":f"1px solid {BORD}"}),
                     html.Div(id="rec-list"),
-                ], style={
-                    "background":C["card"],"border":f"1px solid {C['border']}",
-                    "borderRadius":"8px","marginBottom":"12px"
-                }),
+                ], style={"background":CARD,"border":f"1px solid {BORD}","borderRadius":"10px","marginBottom":"12px"}),
 
-                # Open Positions
                 html.Div([
                     html.Div([
-                        html.Span("Open Positions", style={"fontWeight":"600","fontSize":"14px"}),
-                        html.Span(id="open-count", style={
-                            "background":C["yellow"],"color":"#000","padding":"1px 8px",
-                            "borderRadius":"10px","fontSize":"11px","float":"right"
-                        }),
-                    ], style={"padding":"12px 16px","borderBottom":f"1px solid {C['border']}"}),
-                    html.Div(id="open-pos"),
-                ], style={
-                    "background":C["card"],"border":f"1px solid {C['border']}",
-                    "borderRadius":"8px"
-                }),
+                        html.Span("OPEN POSITIONS",
+                            style={"fontWeight":"700","fontSize":"11px","letterSpacing":"1.5px"}),
+                        html.Span(id="op-cnt", style={
+                            "background":YEL,"color":"#000","padding":"1px 10px",
+                            "borderRadius":"10px","fontSize":"9px","fontWeight":"800","float":"right"}),
+                    ], style={"padding":"12px 16px","borderBottom":f"1px solid {BORD}"}),
+                    html.Div(id="op-list"),
+                ], style={"background":CARD,"border":f"1px solid {BORD}","borderRadius":"10px"}),
 
             ], style={"flex":"1","marginRight":"12px"}),
 
-            # RIGHT COLUMN
             html.Div([
 
-                # Recent Trades
                 html.Div([
                     html.Div([
-                        html.Span("Recent Trades", style={"fontWeight":"600","fontSize":"14px"}),
-                        html.Span(id="trades-count", style={
-                            "background":C["purple"],"color":"#fff","padding":"1px 8px",
-                            "borderRadius":"10px","fontSize":"11px","float":"right"
-                        }),
-                    ], style={"padding":"12px 16px","borderBottom":f"1px solid {C['border']}"}),
-                    html.Div(id="recent-trades",
-                        style={"maxHeight":"380px","overflowY":"auto"}),
-                ], style={
-                    "background":C["card"],"border":f"1px solid {C['border']}",
-                    "borderRadius":"8px","marginBottom":"12px"
-                }),
+                        html.Span("RECENT TRADES",
+                            style={"fontWeight":"700","fontSize":"11px","letterSpacing":"1.5px"}),
+                        html.Span(id="tr-cnt", style={
+                            "background":MUTED,"color":"#fff","padding":"1px 10px",
+                            "borderRadius":"10px","fontSize":"9px","fontWeight":"800","float":"right"}),
+                    ], style={"padding":"12px 16px","borderBottom":f"1px solid {BORD}"}),
+                    html.Div(id="tr-list", style={"maxHeight":"300px","overflowY":"auto"}),
+                ], style={"background":CARD,"border":f"1px solid {BORD}","borderRadius":"10px","marginBottom":"12px"}),
 
-                # Stats
                 html.Div([
-                    html.Div("Statistics", style={
-                        "padding":"12px 16px","fontWeight":"600","fontSize":"14px",
-                        "borderBottom":f"1px solid {C['border']}"
-                    }),
-                    html.Div(id="stats-box", style={"padding":"12px 16px"}),
-                ], style={
-                    "background":C["card"],"border":f"1px solid {C['border']}",
-                    "borderRadius":"8px"
-                }),
+                    html.Div("STATISTICS", style={"padding":"12px 16px","fontWeight":"700",
+                             "fontSize":"11px","letterSpacing":"1.5px","borderBottom":f"1px solid {BORD}"}),
+                    html.Div(id="stats-box", style={"padding":"14px 16px"}),
+                ], style={"background":CARD,"border":f"1px solid {BORD}","borderRadius":"10px","marginBottom":"12px"}),
+
+                html.Div([
+                    html.Div("PORTFOLIO GROWTH", style={"padding":"12px 16px","fontWeight":"700",
+                             "fontSize":"11px","letterSpacing":"1.5px","borderBottom":f"1px solid {BORD}"}),
+                    dcc.Graph(id="port-chart", style={"height":"160px"}, config={"displayModeBar":False}),
+                ], style={"background":CARD,"border":f"1px solid {BORD}","borderRadius":"10px"}),
 
             ], style={"width":"380px"}),
 
-        ], style={"display":"flex","marginBottom":"14px"}),
+        ], style={"display":"flex"}),
 
-        # Portfolio Chart
+    ], style={"padding":"16px 24px","background":BG,"minHeight":"calc(100vh - 52px)"}),
+
+    dcc.Interval(id="iv", interval=10*1000, n_intervals=0),
+
+], style={"background":BG,"fontFamily":"-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif","color":TEXT})
+
+
+def make_chart(key, data):
+    teams = key.split("|")
+    home = teams[0] if len(teams)>0 else "?"
+    away = teams[1] if len(teams)>1 else "?"
+
+    def abbr(name):
+        parts = name.split()
+        return parts[-1][:3].upper() if len(parts)>=2 else name[:3].upper()
+
+    h_abbr = abbr(home)
+    a_abbr = abbr(away)
+
+    times = [d["time"] for d in data]
+    hv = [d["h_pct"] for d in data]
+    av = [d["a_pct"] for d in data]
+
+    lh = hv[-1]; la = av[-1]
+    ph = hv[-2] if len(hv)>1 else lh
+    h_up = lh >= ph
+    h_col = GREEN if h_up else RED
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=times, y=hv, name=h_abbr,
+        mode="lines",
+        line=dict(color=GREEN, width=2.5),
+        fill="tozeroy",
+        fillcolor="rgba(16,185,129,0.05)"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=times, y=av, name=a_abbr,
+        mode="lines",
+        line=dict(color=BLUE, width=2.5),
+    ))
+
+    if times:
+        fig.add_trace(go.Scatter(
+            x=[times[-1]], y=[lh],
+            mode="markers+text",
+            marker=dict(color=h_col, size=8),
+            text=[f"  {h_abbr} {lh}%"],
+            textposition="middle right",
+            textfont=dict(color=h_col, size=10),
+            showlegend=False
+        ))
+        fig.add_trace(go.Scatter(
+            x=[times[-1]], y=[la],
+            mode="markers+text",
+            marker=dict(color=BLUE, size=8),
+            text=[f"  {a_abbr} {la}%"],
+            textposition="middle right",
+            textfont=dict(color=BLUE, size=10),
+            showlegend=False
+        ))
+
+    mn = max(0, min(hv+av) - 10)
+    mx = min(100, max(hv+av) + 10)
+
+    fig.update_layout(
+        plot_bgcolor="#111827",
+        paper_bgcolor="#111827",
+        font=dict(color=TEXT, size=9),
+        margin=dict(l=35, r=80, t=10, b=25),
+        height=180,
+        xaxis=dict(gridcolor="#1f2937",showgrid=True,zeroline=False,tickfont=dict(size=9,color=MUTED)),
+        yaxis=dict(gridcolor="#1f2937",showgrid=True,zeroline=False,
+                  ticksuffix="%",tickfont=dict(size=9,color=MUTED),range=[mn,mx]),
+        legend=dict(font=dict(size=10,color=TEXT),bgcolor="rgba(0,0,0,0)",x=0,y=1,orientation="h"),
+    )
+
+    change = lh - ph
+    ch_sym = "▲" if change>=0 else "▼"
+    ch_col = GREEN if change>=0 else RED
+
+    return html.Div([
         html.Div([
-            html.Div("Portfolio Value", style={
-                "padding":"12px 16px","fontWeight":"600","fontSize":"14px",
-                "borderBottom":f"1px solid {C['border']}"
-            }),
-            dcc.Graph(id="chart", style={"height":"160px"},
-                config={"displayModeBar":False}),
-        ], style={
-            "background":C["card"],"border":f"1px solid {C['border']}",
-            "borderRadius":"8px"
-        }),
-
-    ], style={"padding":"16px 24px","background":C["bg"],"minHeight":"calc(100vh - 52px)"}),
-
-    dcc.Interval(id="interval", interval=60*1000, n_intervals=0),
-    dcc.Store(id="bot-results", data=[]),
-
-], style={
-    "background":C["bg"],
-    "fontFamily":"-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
-    "color":C["text"]
-})
+            html.Div([
+                html.Span(h_abbr, style={"background":GREEN,"color":"#000","padding":"3px 10px",
+                          "borderRadius":"6px","fontSize":"12px","fontWeight":"800",
+                          "fontFamily":"monospace","marginRight":"6px"}),
+                html.Span("vs", style={"color":MUTED,"fontSize":"10px","marginRight":"6px"}),
+                html.Span(a_abbr, style={"background":BLUE,"color":"#fff","padding":"3px 10px",
+                          "borderRadius":"6px","fontSize":"12px","fontWeight":"800","fontFamily":"monospace"}),
+            ]),
+            html.Div([
+                html.Span(f"{lh}%", style={"fontFamily":"monospace","fontSize":"20px",
+                          "fontWeight":"900","color":h_col,"marginRight":"12px"}),
+                html.Span(f"{la}%", style={"fontFamily":"monospace","fontSize":"20px",
+                          "fontWeight":"900","color":BLUE,"marginRight":"10px"}),
+                html.Span(f"{ch_sym}{abs(change):.0f}", style={"fontSize":"13px",
+                          "color":ch_col,"fontFamily":"monospace","fontWeight":"700"}),
+            ]),
+        ], style={"display":"flex","justifyContent":"space-between","alignItems":"center","padding":"10px 14px"}),
+        dcc.Graph(figure=fig, config={"displayModeBar":False}, style={"height":"180px"}),
+    ], style={"background":"#111827","border":f"1px solid {BORD}","borderRadius":"10px",
+              "marginBottom":"8px","overflow":"hidden"})
 
 
 @app.callback(
-    [Output("s-bankroll","children"), Output("s-dpnl","children"),
-     Output("s-tpnl","children"), Output("s-open","children"),
-     Output("s-wr","children"), Output("s-daily","children"),
-     Output("games-list","children"), Output("games-count","children"),
-     Output("rec-list","children"), Output("rec-count","children"),
-     Output("open-pos","children"), Output("open-count","children"),
-     Output("recent-trades","children"), Output("trades-count","children"),
-     Output("chart","figure"),
-     Output("stats-box","children"),
-     Output("refresh-time","children"),
-     Output("api-status","children"),
-     Output("mode-badge","children"), Output("mode-badge","style"),
-     Output("run-dot","style"),
-     Output("bot-results","data")],
-    [Input("interval","n_intervals"),
-     Input("btn-refresh","n_clicks"),
+    [Output("s-bk","children"), Output("s-dp","children"),
+     Output("s-tp","children"), Output("s-op","children"),
+     Output("s-wr","children"), Output("s-td","children"),
+     Output("pm-charts","children"),
+     Output("rec-list","children"), Output("rec-cnt","children"),
+     Output("op-list","children"), Output("op-cnt","children"),
+     Output("tr-list","children"), Output("tr-cnt","children"),
+     Output("port-chart","figure"), Output("stats-box","children"),
+     Output("rtime","children"),
+     Output("mbadge","children"), Output("mbadge","style"),
+     Output("dot","style")],
+    [Input("iv","n_intervals"),
+     Input("btn-ref","n_clicks"),
      Input("btn-run","n_clicks"),
-     Input("btn-pause","n_clicks"),
-     Input("btn-reset","n_clicks"),
-     Input("mode-switch","value")],
+     Input("btn-rst","n_clicks"),
+     Input("msw","value")],
     prevent_initial_call=False
 )
-def update(n, ref, run, pause, reset, live):
+def upd(n, ref, run, rst, live):
     ctx = callback_context
     trig = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
 
-    if "mode-switch" in trig:
-        bot.set_setting("mode","live" if live else "paper")
-    if "btn-reset" in trig:
-        bot.reset_opening_odds()
-    if "btn-refresh" in trig:
-        bot.get_nba_odds_from_api()
-
-    bot_results = []
+    if "msw" in trig: bot.set_setting("mode","live" if live else "paper")
+    if "btn-rst" in trig: bot.reset_opening_odds()
+    if "btn-ref" in trig:
+        def do_ref():
+            g = polymarket_scraper.scrape_polymarket()
+            if g: bot.save_price_history(g)
+        threading.Thread(target=do_ref, daemon=True).start()
     if "btn-run" in trig:
         bot.set_setting("running","true")
-        results, log = bot.analyze_games()
-        print(f"[RUN] {log}")
-        for t in results:
-            bot.save_trade(t)
-        bot_results = results
-    if "btn-pause" in trig:
-        bot.set_setting("running","false")
+        pm = polymarket_scraper.get_cached()
+        results, _ = bot.analyze_games_with_reason(pm if pm else None)
+        for r in results:
+            ex = [t for t in bot.get_trades(50) if t["game"]==r["game"] and t["result"]=="PENDING"]
+            if not ex: bot.save_trade(r)
 
-    stats   = bot.get_stats()
-    trades  = bot.get_trades(100)
-    history = bot.get_portfolio_history()
-    bk      = stats["bankroll"]
+    st = bot.get_stats()
+    trades = bot.get_trades(100)
+    hist_data = bot.get_portfolio_history()
+    bk = st["bankroll"]
+    pm = polymarket_scraper.get_cached()
+    _, skipped = bot.analyze_games_with_reason(pm if pm else None)
 
-    def pspan(v):
-        c = C["green2"] if v>=0 else C["red"]
-        return html.Span(f"${v:+.2f}", style={"color":c,"fontFamily":"monospace",
-                                               "fontSize":"24px","fontWeight":"700"})
+    def ps(v):
+        c = GREEN if v>=0 else RED
+        return html.Span(f"${v:+.2f}", style={"color":c,"fontFamily":"monospace","fontSize":"20px","fontWeight":"700"})
 
-    # Games list
-    games = bot.get_cached_games() or bot.get_todays_games()
-    opening = bot.get_opening_odds()
-
-    if games:
-        game_els = []
-        for g in games:
-            h_o = g.get("h_odds")
-            a_o = g.get("a_odds")
-            if not h_o or not a_o: continue
-            fav = g["home"] if h_o<=a_o else g["away"]
-            fav_odds = min(h_o,a_o)
-            key = f"{g['home']}|{g['away']}"
-            h_op = opening.get(key,{}).get("h")
-            sharp = ""
-            sharp_c = C["muted"]
-            if h_op and h_o < h_op:
-                drop = (h_op-h_o)/h_op
-                if drop >= 0.025:
-                    sharp = f" 🔥 {drop:.1%}"
-                    sharp_c = C["red"]
-                elif drop >= 0.012:
-                    sharp = f" 🟡 {drop:.1%}"
-                    sharp_c = C["yellow"]
-            in_range = 1.22<=fav_odds<=1.82
-            game_els.append(html.Div([
-                html.Div([
-                    html.Span(g["home"][:16],
-                        style={"fontWeight":"600" if h_o<=a_o else "400","fontSize":"13px"}),
-                    html.Span(" vs ", style={"color":C["muted"],"fontSize":"12px","margin":"0 4px"}),
-                    html.Span(g["away"][:16],
-                        style={"fontWeight":"600" if a_o<h_o else "400","fontSize":"13px"}),
-                ]),
-                html.Div([
-                    html.Span(f"{h_o}", style={
-                        "fontFamily":"monospace","fontSize":"13px",
-                        "color":C["green2"] if h_o<=a_o else C["muted"],
-                        "marginRight":"8px","fontWeight":"600" if h_o<=a_o else "400"
-                    }),
-                    html.Span(f"{a_o}", style={
-                        "fontFamily":"monospace","fontSize":"13px",
-                        "color":C["green2"] if a_o<h_o else C["muted"],
-                        "fontWeight":"600" if a_o<h_o else "400"
-                    }),
-                    html.Span(sharp, style={"color":sharp_c,"fontSize":"12px","marginLeft":"8px"}),
-                    html.Span("✓" if in_range else "✗", style={
-                        "color":C["green2"] if in_range else C["red"],
-                        "fontSize":"12px","marginLeft":"8px"
-                    }),
-                ]),
-            ], style={
-                "display":"flex","justifyContent":"space-between","alignItems":"center",
-                "padding":"9px 14px","borderBottom":f"1px solid {C['border']}"
-            }))
-        games_el = game_els
-        games_cnt = str(len(games))
+    # Probability Charts
+    ph = bot.get_price_history()
+    if ph:
+        charts = []
+        for key, data in list(ph.items())[:8]:
+            if len(data) < 2: continue
+            charts.append(make_chart(key, data))
+        pm_charts = charts if charts else [
+            html.P("REFRESH → ჩარტები გამოჩნდება",
+                style={"color":MUTED,"padding":"20px","textAlign":"center","fontSize":"12px"})
+        ]
     else:
-        games_el = [html.P("Odds ჩამოტვირთვა... Run Analysis დააჭირე",
-            style={"color":C["muted"],"padding":"16px","textAlign":"center","fontSize":"13px"})]
-        games_cnt = "0"
+        pm_charts = [html.P("REFRESH ODDS დააჭირე → ჩარტები გამოჩნდება",
+            style={"color":MUTED,"padding":"20px","textAlign":"center","fontSize":"12px"})]
 
-    # Recommendations (ბოტის შედეგები)
-    pending_new = [t for t in trades if t["result"]=="PENDING"]
-    if pending_new:
-        rec_els = []
-        for t in pending_new:
-            sh = {"Strong":"🔥 Strong","Medium":"🟡 Medium"}.get(t.get("sharp_label",""),"—")
-            tc = {"A":C["green"],"B":C["blue"],"C":C["yellow"]}.get(t.get("tier",""),C["muted"])
+    # Bot Analysis
+    pending = [t for t in trades if t["result"]=="PENDING"]
+    rec_els = []
+
+    if pending:
+        for t in pending:
+            tc = {"A":GREEN,"B":BLUE,"C":YEL}.get(t.get("tier",""), MUTED)
+            sh = {"Strong":"🔥","Medium":"🟡"}.get(t.get("sharp_label",""), "")
+            reasons = t.get("reasons", [])
             rec_els.append(html.Div([
                 html.Div([
-                    html.Div(f"✅ {t['fav']}", style={"fontWeight":"600","fontSize":"14px","color":C["green2"],"marginBottom":"2px"}),
-                    html.Div(t["game"][:40], style={"fontSize":"11px","color":C["muted"]}),
-                ]),
+                    html.Div([
+                        html.Span("✅ "),
+                        html.Span(t["fav"], style={"fontWeight":"800","fontSize":"14px","color":GREEN}),
+                    ]),
+                    html.Div(t["game"][:40], style={"fontSize":"10px","color":MUTED,"marginTop":"2px"}),
+                    html.Div([
+                        html.Div("მიზეზები:", style={"fontSize":"9px","color":MUTED,"fontWeight":"700",
+                                 "marginTop":"6px","marginBottom":"3px","letterSpacing":"1px"}),
+                        *[html.Div(f"↳ {r}", style={"fontSize":"10px","color":BLUE,"marginBottom":"2px"})
+                          for r in reasons[:5]]
+                    ]),
+                ], style={"flex":"1"}),
                 html.Div([
-                    html.Div([
-                        html.Span(f"@{t['odds']}", style={"fontFamily":"monospace","color":C["blue"],"fontWeight":"700","fontSize":"15px"}),
-                        html.Span(f" {sh}", style={"fontSize":"12px","marginLeft":"8px"}),
-                    ]),
-                    html.Div([
-                        html.Span(f"Tier {t['tier']}", style={
-                            "background":tc,"color":"#fff","padding":"1px 6px",
-                            "borderRadius":"4px","fontSize":"11px","marginRight":"6px"
-                        }),
-                        html.Span(f"Edge:{t['edge']:+.1%}", style={"color":C["muted"],"fontSize":"11px","marginRight":"6px"}),
-                        html.Span(f"EV:{t['ev']:+.3f}", style={"color":C["muted"],"fontSize":"11px"}),
-                    ]),
-                    html.Div([
-                        html.Span(f"💵 ${t['stake']:.2f}", style={"color":C["text"],"fontWeight":"600","fontSize":"13px","marginRight":"8px"}),
-                        html.Span(f"→ +${t['pot']:.2f}", style={"color":C["green2"],"fontSize":"13px"}),
-                    ]),
-                ]),
-            ], style={
-                "display":"flex","justifyContent":"space-between","alignItems":"flex-start",
-                "padding":"10px 14px","borderBottom":f"1px solid {C['border']}"
-            }))
-        rec_el = rec_els
-        rec_cnt = str(len(pending_new))
-    else:
-        rec_el = [html.P("Run Analysis → ბოტი გაანალიზებს",
-            style={"color":C["muted"],"padding":"16px","textAlign":"center","fontSize":"13px"})]
-        rec_cnt = "0"
+                    html.Div(f"@{t['odds']}x", style={"fontFamily":"monospace","color":BLUE,
+                             "fontWeight":"900","fontSize":"18px"}),
+                    html.Div(f"{sh} Tier {t['tier']}", style={"fontSize":"10px","color":YEL,"marginBottom":"3px"}),
+                    html.Div(f"EV {t['ev']:+.3f}", style={"color":MUTED,"fontSize":"9px"}),
+                    html.Div(f"${t['stake']:.2f} -> +${t['pot']:.2f}",
+                        style={"color":GREEN,"fontWeight":"700","fontSize":"12px",
+                               "fontFamily":"monospace","marginTop":"4px"}),
+                ], style={"textAlign":"right","minWidth":"120px"}),
+            ], style={"display":"flex","justifyContent":"space-between","alignItems":"flex-start",
+                      "padding":"12px 16px","borderBottom":f"1px solid {BORD}",
+                      "borderLeft":f"3px solid {GREEN}"}))
 
-    # Open positions (W/L buttons)
-    pending = [t for t in trades if t["result"]=="PENDING"]
+    if skipped:
+        rec_els.append(html.Div("SKIP -- მიზეზები", style={
+            "padding":"6px 16px","fontSize":"9px","color":MUTED,
+            "fontWeight":"700","letterSpacing":"1.5px","background":BG}))
+        for s in skipped[:6]:
+            rec_els.append(html.Div([
+                html.Div([
+                    html.Span("X ", style={"color":RED,"fontWeight":"700"}),
+                    html.Span(s["fav"], style={"fontSize":"12px","fontWeight":"700"}),
+                    html.Span(f" @{s['odds']}x", style={"fontFamily":"monospace","fontSize":"11px","color":MUTED,"marginLeft":"4px"}),
+                ]),
+                *[html.Div(f"  -> {r}", style={"fontSize":"10px","color":RED,"marginTop":"2px","paddingLeft":"12px"})
+                  for r in s.get("reasons",[])[:2]],
+            ], style={"padding":"8px 16px","borderBottom":f"1px solid {BORD}"}))
+
+    if not rec_els:
+        rec_els = [html.P("RUN დააჭირე ანალიზისთვის",
+            style={"color":MUTED,"padding":"20px","textAlign":"center","fontSize":"12px"})]
+
+    # Open Positions
     if pending:
         rows = []
         for t in pending:
-            sh = {"Strong":"🔥","Medium":"🟡"}.get(t.get("sharp_label",""),"—")
-            tc = {"A":C["green"],"B":C["blue"],"C":C["yellow"]}.get(t.get("tier",""),C["muted"])
+            tc = {"A":GREEN,"B":BLUE,"C":YEL}.get(t.get("tier",""), MUTED)
+            sh = {"Strong":"🔥","Medium":"🟡"}.get(t.get("sharp_label",""), "")
             rows.append(html.Div([
                 html.Div([
-                    html.Div(t["game"][:28], style={"fontSize":"11px","color":C["muted"]}),
+                    html.Div(t["game"][:28], style={"fontSize":"9px","color":MUTED}),
                     html.Div([
-                        html.Span(t["fav"][:14], style={"fontWeight":"600","fontSize":"13px","marginRight":"6px"}),
-                        html.Span(f"@{t['odds']}", style={"fontFamily":"monospace","color":C["blue"],"fontSize":"12px"}),
-                        html.Span(f" {sh}", style={"marginLeft":"4px"}),
+                        html.Span(t["fav"][:14], style={"fontWeight":"700","fontSize":"13px","marginRight":"6px"}),
+                        html.Span(f"@{t['odds']}x", style={"fontFamily":"monospace","color":BLUE,"fontSize":"12px"}),
+                        html.Span(f" {sh}"),
                     ]),
                 ]),
                 html.Div([
-                    html.Span(f"Tier {t['tier']}", style={
-                        "background":tc,"color":"#fff","padding":"1px 6px",
-                        "borderRadius":"4px","fontSize":"11px","marginRight":"6px"
-                    }),
-                    html.Span(f"${t['stake']:.0f}→+${t['pot']:.0f}",
-                        style={"color":C["muted"],"fontSize":"12px","marginRight":"8px"}),
-                    html.Button("W", id={"type":"btn-w","index":t["id"]}, style={
-                        "background":C["success"],"color":"#fff","border":"none",
-                        "padding":"2px 8px","borderRadius":"4px","fontSize":"11px",
-                        "cursor":"pointer","marginRight":"4px"
-                    }),
-                    html.Button("L", id={"type":"btn-l","index":t["id"]}, style={
-                        "background":C["red"],"color":"#fff","border":"none",
-                        "padding":"2px 8px","borderRadius":"4px","fontSize":"11px","cursor":"pointer"
-                    }),
+                    html.Span(f"T{t['tier']}", style={"background":tc,"color":"#000","padding":"1px 8px",
+                              "borderRadius":"4px","fontSize":"9px","fontWeight":"800","marginRight":"6px"}),
+                    html.Span(f"${t['stake']:.0f}->+${t['pot']:.0f}", style={"color":MUTED,
+                              "fontSize":"11px","fontFamily":"monospace","marginRight":"8px"}),
+                    html.Button("W", id={"type":"bw","index":t["id"]}, style={
+                        "background":GREEN,"color":"#000","border":"none","padding":"2px 10px",
+                        "borderRadius":"4px","fontSize":"11px","fontWeight":"700","cursor":"pointer","marginRight":"4px"}),
+                    html.Button("L", id={"type":"bl","index":t["id"]}, style={
+                        "background":RED,"color":"#fff","border":"none","padding":"2px 10px",
+                        "borderRadius":"4px","fontSize":"11px","fontWeight":"700","cursor":"pointer"}),
                 ], style={"display":"flex","alignItems":"center"}),
-            ], style={
-                "display":"flex","justifyContent":"space-between","alignItems":"center",
-                "padding":"8px 14px","borderBottom":f"1px solid {C['border']}"
-            }))
-        open_el = rows
+            ], style={"display":"flex","justifyContent":"space-between","alignItems":"center",
+                      "padding":"8px 14px","borderBottom":f"1px solid {BORD}"}))
+        op_list = rows
     else:
-        open_el = [html.P("ღია პოზიცია არ არის",
-            style={"color":C["muted"],"padding":"16px","textAlign":"center","fontSize":"13px"})]
+        op_list = [html.P("ღია პოზიცია არ არის",
+            style={"color":MUTED,"padding":"14px","textAlign":"center","fontSize":"12px"})]
 
-    # Recent trades
+    # Recent Trades
     done = [t for t in trades if t["result"]!="PENDING"][:20]
     if done:
         rows = []
@@ -442,130 +427,79 @@ def update(n, ref, run, pause, reset, live):
             won = t["result"]=="WIN"
             rows.append(html.Div([
                 html.Div([
-                    html.Div(t["game"][:28], style={"fontSize":"11px","color":C["muted"]}),
-                    html.Span(t["fav"][:14], style={"fontSize":"13px","fontWeight":"500"}),
+                    html.Div(t["game"][:26], style={"fontSize":"9px","color":MUTED}),
+                    html.Span(t["fav"][:14], style={"fontSize":"12px","fontWeight":"600"}),
                 ]),
                 html.Div([
-                    html.Span(f"@{t['odds']}", style={"fontFamily":"monospace","fontSize":"11px","color":C["muted"],"marginRight":"8px"}),
-                    html.Span(f"${t.get('pnl',0):+.2f}", style={
-                        "color":C["green2"] if won else C["red"],
-                        "fontFamily":"monospace","fontSize":"13px","fontWeight":"600"
-                    }),
-                    html.Span(" ✅" if won else " ❌", style={"fontSize":"11px"}),
+                    html.Span(f"@{t['odds']}x ", style={"fontFamily":"monospace","fontSize":"9px","color":MUTED}),
+                    html.Span(f"${t.get('pnl',0):+.2f}", style={"color":GREEN if won else RED,
+                              "fontFamily":"monospace","fontSize":"13px","fontWeight":"800"}),
+                    html.Span(" V" if won else " X"),
                 ]),
-            ], style={
-                "display":"flex","justifyContent":"space-between","alignItems":"center",
-                "padding":"7px 12px","borderBottom":f"1px solid {C['border']}"
-            }))
-        recent_el = rows
+            ], style={"display":"flex","justifyContent":"space-between","alignItems":"center",
+                      "padding":"7px 14px","borderBottom":f"1px solid {BORD}"}))
+        tr_list = rows
     else:
-        recent_el = [html.P("ბეთი ჯერ არ არის",
-            style={"color":C["muted"],"padding":"16px","textAlign":"center","fontSize":"13px"})]
+        tr_list = [html.P("ბეთი ჯერ არ არის",
+            style={"color":MUTED,"padding":"14px","textAlign":"center","fontSize":"12px"})]
 
-    # Chart
-    if history and len(history)>1:
-        times  = [h[0] for h in history]
-        values = [h[1] for h in history]
+    # Portfolio Chart
+    if hist_data and len(hist_data)>1:
+        ptimes = [h[0] for h in hist_data]
+        pvals  = [h[1] for h in hist_data]
     else:
-        times  = [datetime.now().strftime("%H:%M")]
-        values = [bk]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=times, y=values, mode="lines", fill="tozeroy",
-        line=dict(color=C["blue"],width=2), fillcolor="rgba(88,166,255,0.08)"))
-    fig.update_layout(
-        plot_bgcolor=C["card"], paper_bgcolor=C["card"],
-        font=dict(color=C["text"]),
+        ptimes = [datetime.now().strftime("%H:%M")]
+        pvals  = [bk]
+    pfig = go.Figure()
+    pfig.add_trace(go.Scatter(x=ptimes, y=pvals, mode="lines", fill="tozeroy",
+        line=dict(color=GREEN, width=2), fillcolor="rgba(16,185,129,0.06)"))
+    pfig.update_layout(
+        plot_bgcolor=CARD, paper_bgcolor=CARD, font=dict(color=TEXT),
         margin=dict(l=50,r=10,t=5,b=30),
-        xaxis=dict(gridcolor=C["border"],showgrid=True,zeroline=False),
-        yaxis=dict(gridcolor=C["border"],showgrid=True,zeroline=False,tickprefix="$"),
+        xaxis=dict(gridcolor=BORD,showgrid=True,zeroline=False,tickfont=dict(size=9,color=MUTED)),
+        yaxis=dict(gridcolor=BORD,showgrid=True,zeroline=False,tickprefix="$",tickfont=dict(size=9,color=MUTED)),
         showlegend=False
     )
 
-    # Stats box
-    total_done = len(done)
+    # Stats
+    td   = len(done)
     wins = sum(1 for t in done if t["result"]=="WIN")
-    wr = f"{wins/total_done*100:.1f}%" if total_done else "—"
-    avg_o = sum(t["odds"] for t in done)/total_done if total_done else 0
-    stats_el = html.Div([
-        html.Div([
-            html.Div([
-                html.P("Win Rate",style={"color":C["muted"],"fontSize":"11px","marginBottom":"2px"}),
-                html.P(wr,style={"color":C["green2"],"fontWeight":"700","fontSize":"18px","fontFamily":"monospace"})
-            ]),
-            html.Div([
-                html.P("W / L",style={"color":C["muted"],"fontSize":"11px","marginBottom":"2px"}),
-                html.P(f"{wins}/{total_done-wins}",style={"color":C["text"],"fontWeight":"700","fontSize":"18px","fontFamily":"monospace"})
-            ]),
-            html.Div([
-                html.P("Avg Odds",style={"color":C["muted"],"fontSize":"11px","marginBottom":"2px"}),
-                html.P(f"{avg_o:.2f}" if avg_o else "—",style={"color":C["blue"],"fontWeight":"700","fontSize":"18px","fontFamily":"monospace"})
-            ]),
-            html.Div([
-                html.P("Total Bets",style={"color":C["muted"],"fontSize":"11px","marginBottom":"2px"}),
-                html.P(str(total_done),style={"color":C["text"],"fontWeight":"700","fontSize":"18px","fontFamily":"monospace"})
-            ]),
-        ], style={"display":"grid","gridTemplateColumns":"repeat(4,1fr)","gap":"8px"})
-    ])
+    wr   = f"{wins/td*100:.1f}%" if td else "--"
+    ao   = sum(t["odds"] for t in done)/td if td else 0
+    stats_el = html.Div([html.Div([
+        html.Div([html.P("WIN RATE",style={"color":MUTED,"fontSize":"8px","fontWeight":"700","letterSpacing":"1.5px","marginBottom":"4px"}),
+                  html.P(wr,style={"color":GREEN,"fontWeight":"800","fontSize":"20px","fontFamily":"monospace"})]),
+        html.Div([html.P("W / L",style={"color":MUTED,"fontSize":"8px","fontWeight":"700","letterSpacing":"1.5px","marginBottom":"4px"}),
+                  html.P(f"{wins}/{td-wins}",style={"color":TEXT,"fontWeight":"800","fontSize":"20px","fontFamily":"monospace"})]),
+        html.Div([html.P("AVG ODDS",style={"color":MUTED,"fontSize":"8px","fontWeight":"700","letterSpacing":"1.5px","marginBottom":"4px"}),
+                  html.P(f"{ao:.2f}x" if ao else "--",style={"color":BLUE,"fontWeight":"800","fontSize":"20px","fontFamily":"monospace"})]),
+        html.Div([html.P("TOTAL",style={"color":MUTED,"fontSize":"8px","fontWeight":"700","letterSpacing":"1.5px","marginBottom":"4px"}),
+                  html.P(str(td),style={"color":TEXT,"fontWeight":"800","fontSize":"20px","fontFamily":"monospace"})]),
+    ], style={"display":"grid","gridTemplateColumns":"repeat(4,1fr)","gap":"8px"})])
 
-    # Mode
     mode = bot.get_setting("mode") or "paper"
-    is_paper = mode=="paper"
-    mode_txt = "PAPER MODE" if is_paper else "⚡ LIVE MODE"
-    mode_style = {
-        "background":C["yellow"] if is_paper else C["red"],
-        "color":"#000" if is_paper else "#fff",
-        "padding":"2px 10px","borderRadius":"4px","fontSize":"11px",
-        "fontWeight":"700","marginLeft":"12px"
-    }
-
-    is_running = bot.get_setting("running")=="true"
-    dot_style = {"color":C["green2"] if is_running else C["red"],"fontSize":"10px","marginRight":"6px"}
-
-    import os
-    has_key = bool(os.environ.get("ODDS_API_KEY",""))
-    api_txt = f"✅ Odds API connected | {len(games)} games" if has_key else "❌ No API key"
-
-    rt = f"Updated: {datetime.now().strftime('%H:%M:%S')}"
-
-    wr_txt = f"{stats['win_rate']:.1f}%" if stats['total_trades']>0 else "—"
+    ip   = mode=="paper"
+    mt   = "PAPER" if ip else "LIVE"
+    ms   = {"background":YEL if ip else RED,"color":"#000","padding":"2px 10px",
+            "borderRadius":"12px","fontSize":"9px","fontWeight":"800","marginLeft":"12px"}
+    ir   = bot.get_setting("running")=="true"
+    ds   = {"color":GREEN if ir else RED,"fontSize":"12px","marginRight":"8px"}
+    wr2  = f"{st['win_rate']:.1f}%" if st['total_trades']>0 else "--"
 
     return (
-        f"${bk:.2f}", pspan(stats["daily_pnl"]), pspan(stats["pnl"]),
-        str(stats["open_positions"]), wr_txt, str(stats["daily_trades"]),
-        games_el, games_cnt,
-        rec_el, rec_cnt,
-        open_el, str(len(pending)),
-        recent_el, str(len(done)),
-        fig, stats_el, rt, api_txt,
-        mode_txt, mode_style, dot_style,
-        bot_results
+        f"${bk:,.2f}", ps(st["daily_pnl"]), ps(st["pnl"]),
+        str(st["open_positions"]), wr2, str(st["daily_trades"]),
+        pm_charts,
+        rec_els, str(len(pending)),
+        op_list, str(len(pending)),
+        tr_list, str(len(done)),
+        pfig, stats_el,
+        datetime.now().strftime("%H:%M:%S"),
+        mt, ms, ds
     )
 
 
-@app.callback(
-    Output("open-pos","children", allow_duplicate=True),
-    [Input({"type":"btn-w","index":dash.ALL},"n_clicks"),
-     Input({"type":"btn-l","index":dash.ALL},"n_clicks")],
-    prevent_initial_call=True
-)
-def resolve_bet(w_clicks, l_clicks):
-    ctx = callback_context
-    if not ctx.triggered: return dash.no_update
-    trig = ctx.triggered[0]
-    prop = trig["prop_id"]
-    if not trig["value"]: return dash.no_update
-    import json as js
-    try:
-        id_part = prop.split(".")[0]
-        id_dict = js.loads(id_part)
-        trade_id = id_dict["index"]
-        won = id_dict["type"] == "btn-w"
-        bot.update_result(trade_id, won)
-    except: pass
-    return dash.no_update
-
-
 if __name__ == "__main__":
-    print("\n🏀 NBA Polymarket Agent v3.0")
-    print("→ http://localhost:8050\n")
+    print("\n NBA Polymarket Agent")
+    print("-> http://localhost:8050\n")
     app.run(debug=False, host="0.0.0.0", port=8050)
